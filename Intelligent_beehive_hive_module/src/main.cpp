@@ -12,6 +12,7 @@
 #include <Wire.h>
 #include <utility> // Pro std::pair
 #include <esp_wifi.h>
+#include <esp_sleep.h>
 
 // Parametry
 #define SAMPLES      1024
@@ -30,11 +31,11 @@
 #define DHTPIN       GPIO_NUM_15
 #define DHTTYPE      DHT22
 
-#define HX711_DOUT   GPIO_NUM_13
-#define HX711_CLK    GPIO_NUM_12
+#define HX711_DOUT   GPIO_NUM_12
+#define HX711_CLK    GPIO_NUM_13
 
-#define MPU_SCL      GPIO_NUM_9
-#define MPU_SDA      GPIO_NUM_8
+#define MPU_SCL      GPIO_NUM_8
+#define MPU_SDA      GPIO_NUM_9
 
 #define WIFI_CHANNEL 6
 
@@ -55,9 +56,9 @@ HX711 scale;
 Adafruit_MPU6050 mpu;
 
 // Proměnné pro kalibraci a vážení
-float calibration_factor = -20116.00; // Kalibrační faktor, upravte po kalibraci
-float known_weight = 1.0; // Známá hmotnost (v kg) použitá při kalibraci
-float known_offset = 3.55;
+float calibration_factor = -18665.0; // Kalibrační faktor, upravte po kalibraci
+float known_weight = 3.0; // Známá hmotnost (v kg) použitá při kalibraci
+float known_offset = 5.0;
 
 // Zpráva na sběr dat
 typedef struct esp_now_message {
@@ -78,12 +79,12 @@ typedef struct esp_now_message {
 esp_now_message data;
 
 struct MPU6050Data {
-    float accelX;
-    float accelY;
-    float accelZ;
     float gyroX;
     float gyroY;
     float gyroZ;
+    float accelX;
+    float accelY;
+    float accelZ;
 };
 
 // Deklarace funkcí
@@ -100,11 +101,10 @@ std::pair<float, float> getDHT22();
 float getWeight();
 MPU6050Data getMPUValues();
 void esp_now_process();
-//void calibrateScale();
+void calibrateScale();
 
 void setup() {
     Serial.begin(115200);
-
     // Setup ESP-NOW, Setup I2S a inicializace všech senzorů
     setupESP_now();
     setupI2S();
@@ -112,17 +112,18 @@ void setup() {
     setupMPU();
     sensors.begin();
     dht.begin();
+    esp_sleep_enable_timer_wakeup(5 * 1000000);
     
-    delay(10000);
-    //esp_now_process();
+    delay(2000);
+    esp_now_process();
 }
 
 void loop() {
-    /*delay(10000); // Aktualizace každou sekundu
-    MPU6050Data mpuData = getMPUValues();
+    //delay(10000); // Aktualizace každou sekundu
+    /*MPU6050Data mpuData = getMPUValues();
 
     Serial.printf("Gyro [°/s] -> gX: %.2f, gY: %.2f, gZ: %.2f\n", mpuData.gyroX, mpuData.gyroY, mpuData.gyroZ);
-    Serial.printf("Accel [m/s²] -> aX: %.2f, aY: %.2f, aZ: %.2f\n", mpuData.accelX, mpuData.accelY, mpuData.accelZ);
+    Serial.printf("Accel [m/s²] -> aX: %.2f, aY: %.2f, aZ: %.2f\n", mpuData.accelX, mpuData.accelY, mpuData.accelZ);*/
     
     /*if (Serial.available()) {
         char command = Serial.read();
@@ -130,19 +131,16 @@ void loop() {
             calibrateScale();
         }
     }
-    scale.set_scale(calibration_factor);
-    char command = Serial.read();
-        if (command == 'c') {
-            calibrateScale();
-        }
 
-    // Měření hmotnosti
-    float weight = scale.get_units(10); 
-    weight = weight - known_offset;
-    Serial.print("Hmotnost2 (kg): ");
-    Serial.println(weight, 2);
-    */
-   esp_now_process();
+    // Použij nastavený kalibrační faktor
+    scale.set_scale(calibration_factor);
+
+    // Získání hmotnosti
+    getWeight();
+
+    delay(2000); // Měření každé 2 sekundy*/
+    //esp_now_process();
+
 }
 
 void setupI2S() {
@@ -221,8 +219,9 @@ void setupESP_now() {
 
 void setupHX711() {
     scale.begin(HX711_DOUT, HX711_CLK);
-
     // Zkontrolujte, zda je HX711 připraven
+    //scale.set_scale(); // Reset kalibračního faktoru
+    //scale.tare();      // Nulování bez zátěže
     if (!scale.is_ready()) {
         Serial.println("HX711 není připraven. Zkontrolujte připojení.");
         return;
@@ -328,9 +327,9 @@ void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
         delay(30000);
         esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &data, sizeof(data));
     } else {
-        delay(3000);
+        delay(1000);
         Serial.println("Entering Deep Sleep");
-        //esp_deep_sleep_start(); //Enter deep sleep
+        esp_deep_sleep_start(); //Enter deep sleep
     }
 }
 
@@ -370,7 +369,8 @@ std::pair<float, float> getDHT22() {
 
 float getWeight() {
     // je třeba dodělat kalibraci
-    float weight = scale.get_units(10); // Průměrování z 10 měření
+    scale.set_scale(calibration_factor);
+    float weight = scale.get_units(25); // Průměrování z 10 měření
     weight = weight - known_offset;
     Serial.print("Hmotnost (kg): ");
     Serial.println(weight, 2);
@@ -400,13 +400,20 @@ MPU6050Data getMPUValues() {
 
 void esp_now_process() {
     MPU6050Data mpuData = getMPUValues();
+    Serial.println("MPU Data získána");
     strncpy(data.mac, WiFi.macAddress().c_str(), sizeof(data.mac) - 1);
     data.mac[17] = '\0';
     data.weight = getWeight();
+    Serial.print("Váha: ");
+    Serial.println(data.weight);
+    Serial.println("Váha Data získána");
     data.hiveTemp = getDS18B20();
+    Serial.println("DS Data získána");
     data.moduleTemp = getDHT22().first;
     data.moduleHum = getDHT22().second;
+    Serial.println("DHT Data získána");
     data.frequency = readMicrophoneData();
+    Serial.println("Mic Data získána");
     data.gyroX = mpuData.gyroX;
     data.gyroY = mpuData.gyroY;
     data.gyroZ = mpuData.gyroZ;
@@ -423,24 +430,27 @@ void esp_now_process() {
     }
 }
 
-/*void calibrateScale() {
-    Serial.println("Kalibrace: Umístěte známou hmotnost na senzor.");
-    Serial.print("wating..");
-    scale.set_scale(); // Nastaví faktor na výchozí hodnotu
-    scale.tare();      // Nulování váhy
-    while (Serial.read() != 'n')
-    {
+void calibrateScale() {
+    Serial.println("Odstraň veškerou zátěž z váhy.");
+    delay(5000);
+
+    scale.set_scale(); // reset měřítka
+    scale.tare();      // vynuluj váhu
+    Serial.println("Nyní polož známou hmotnost a stiskni 'n'.");
+
+    // Čekej na zadání 'n'
+    while (Serial.available() == 0 || Serial.read() != 'n') {
         Serial.print(".");
         delay(500);
     }
-    Serial.println("done");
+    Serial.println("\nČtu hodnotu...");
 
-    float raw_value = scale.get_units(50);
-    calibration_factor = raw_value / known_weight;
+    float reading = scale.get_units(20);
+    calibration_factor = reading / known_weight;
 
     Serial.print("Nový kalibrační faktor: ");
-    Serial.println(calibration_factor);
+    Serial.println(calibration_factor, 4);
 
     scale.set_scale(calibration_factor);
-    Serial.println("Kalibrace dokončena.");
-}*/
+    Serial.println("Kalibrace uložena a použita.");
+}
